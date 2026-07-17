@@ -4,15 +4,14 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import bcrypt from "bcrypt";
+import { PrismaClient } from "@prisma/client";
+
+const prisma = new PrismaClient();
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json({ limit: "15mb" }));
-
-// Database setup
-const DB_DIR = path.join(process.cwd(), "data");
-const DB_FILE = path.join(DB_DIR, "tasks-db.json");
 
 interface EncryptedTask {
   id: string;
@@ -27,61 +26,9 @@ interface SharedTask {
   sharedAt: number;
 }
 
-interface SpaceData {
-  spaceId: string;
-  tasks: EncryptedTask[];
-  inbox: SharedTask[];
-  updatedAt: number;
-}
-
-interface UserAccount {
-  username: string;
-  passwordHash: string;
-  spaceId: string;
-  createdAt: number;
-}
-
-// In-memory db with file backup
-let db: {
-  spaces: Record<string, SpaceData>;
-  users?: Record<string, UserAccount>;
-} = { spaces: {}, users: {} };
-
-function loadDatabase() {
-  try {
-    if (!fs.existsSync(DB_DIR)) {
-      fs.mkdirSync(DB_DIR, { recursive: true });
-    }
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, "utf-8");
-      db = JSON.parse(data);
-      if (!db.users) {
-        db.users = {};
-      }
-      console.log("Database loaded successfully with", Object.keys(db.spaces).length, "spaces.");
-    } else {
-      db.users = {};
-      saveDatabase();
-    }
-  } catch (error) {
-    console.error("Failed to load database, starting fresh:", error);
-    db.users = {};
-  }
-}
-
-function saveDatabase() {
-  try {
-    if (!fs.existsSync(DB_DIR)) {
-      fs.mkdirSync(DB_DIR, { recursive: true });
-    }
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
-  } catch (error) {
-    console.error("Failed to save database:", error);
-  }
-}
-
-// Load database immediately
-loadDatabase();
+// We will keep a local map for inbox for backward compatibility with the frontend structure
+// while the rest migrates to SQLite ORM
+const dbInbox: Record<string, SharedTask[]> = {};
 
 // SSE Clients Registry
 interface SSEClient {
@@ -97,40 +44,60 @@ app.get("/api/health", (req, res) => {
 });
 
 // API: Generate a new Sync Space ID (e.g. SPACE-XXXX-XXXX)
-app.post("/api/sync/create-space", (req, res) => {
+app.post("/api/sync/create-space", async (req, res) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let spaceId = "SPACE-";
   for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
   spaceId += "-";
   for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
 
-  db.spaces[spaceId] = {
-    spaceId,
-    tasks: [],
-    inbox: [],
-    updatedAt: Date.now(),
-  };
-  saveDatabase();
-
-  res.json({ spaceId, success: true });
+  try {
+    await prisma.space.create({
+      data: {
+        id: spaceId
+      }
+    });
+    res.json({ spaceId, success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create space" });
+  }
 });
 
 // API: Get tasks for a specific space
-app.get("/api/sync/space/:spaceId", (req, res) => {
+app.get("/api/sync/space/:spaceId", async (req, res) => {
   const { spaceId } = req.params;
-  const space = db.spaces[spaceId];
-  if (!space) {
-    return res.status(404).json({ error: "Space not found" });
+  try {
+    const space = await prisma.space.findUnique({
+      where: { id: spaceId },
+      include: { tasks: true }
+    });
+
+    if (!space) {
+      return res.status(404).json({ error: "Space not found" });
+    }
+
+    const inbox = dbInbox[spaceId] || [];
+
+    // We return mapped tasks keeping the structure client expects
+    const mappedTasks = space.tasks.map(t => ({
+        id: t.id,
+        encryptedData: t.notes || "",
+        updatedAt: t.updatedAt.getTime()
+    }));
+
+    res.json({
+      spaceId: space.id,
+      tasks: mappedTasks,
+      inbox,
+      updatedAt: space.updatedAt.getTime()
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
   }
-  // Ensure inbox exists for backward compatibility
-  if (!space.inbox) {
-    space.inbox = [];
-  }
-  res.json(space);
 });
 
 // API: Update tasks for a space and notify other connected devices via SSE
-app.post("/api/sync/space/:spaceId/update", (req, res) => {
+app.post("/api/sync/space/:spaceId/update", async (req, res) => {
   const { spaceId } = req.params;
   const { tasks } = req.body;
 
@@ -138,43 +105,51 @@ app.post("/api/sync/space/:spaceId/update", (req, res) => {
     return res.status(400).json({ error: "Invalid tasks payload" });
   }
 
-  let space = db.spaces[spaceId];
-  if (!space) {
-    // Dynamically initialize if client has a pre-existing space ID they want to restore or use
-    space = {
-      spaceId,
-      tasks: [],
-      inbox: [],
-      updatedAt: Date.now(),
-    };
-    db.spaces[spaceId] = space;
-  }
-
-  space.tasks = tasks.map((t: any) => ({
-    id: String(t.id),
-    encryptedData: String(t.encryptedData),
-    updatedAt: Number(t.updatedAt) || Date.now(),
-  }));
-  space.updatedAt = Date.now();
-  saveDatabase();
-
-  // Notify other SSE clients subscribed to this space
-  const senderClientId = req.headers["x-client-id"] as string;
-  clients.forEach((client) => {
-    if (client.spaceId === spaceId && client.id !== senderClientId) {
-      try {
-        client.res.write(`data: ${JSON.stringify({ type: "sync", spaceId, updatedAt: space.updatedAt })}\n\n`);
-      } catch (err) {
-        console.error("Error sending SSE update:", err);
-      }
+  try {
+    let space = await prisma.space.findUnique({ where: { id: spaceId } });
+    if (!space) {
+      space = await prisma.space.create({ data: { id: spaceId } });
     }
-  });
 
-  res.json({ success: true, updatedAt: space.updatedAt });
+    // We store the encrypted E2EE blob into 'notes' and a dummy title to make it work
+    for (const t of tasks) {
+        await prisma.task.upsert({
+            where: { id: t.id },
+            create: {
+                id: t.id,
+                spaceId: space.id,
+                title: 'Encrypted Task',
+                notes: t.encryptedData || t.data || '',
+            },
+            update: {
+                notes: t.encryptedData || t.data || '',
+            }
+        });
+    }
+
+    const updatedAt = Date.now();
+
+    // Notify other SSE clients subscribed to this space
+    const senderClientId = req.headers["x-client-id"] as string;
+    clients.forEach((client) => {
+      if (client.spaceId === spaceId && client.id !== senderClientId) {
+        try {
+          client.res.write(`data: ${JSON.stringify({ type: "sync", spaceId, updatedAt })}\n\n`);
+        } catch (err) {
+          console.error("Error sending SSE update:", err);
+        }
+      }
+    });
+
+    res.json({ success: true, updatedAt });
+  } catch (err) {
+    console.error("Update error:", err);
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 // API: Share an encrypted task to another target space
-app.post("/api/sync/space/:spaceId/share", (req, res) => {
+app.post("/api/sync/space/:spaceId/share", async (req, res) => {
   const { spaceId } = req.params; // This is the recipient's space ID
   const { senderSpaceId, encryptedData, taskId } = req.body;
 
@@ -182,46 +157,47 @@ app.post("/api/sync/space/:spaceId/share", (req, res) => {
     return res.status(400).json({ error: "encryptedData is required" });
   }
 
-  // Find recipient's space
-  let space = db.spaces[spaceId];
-  if (!space) {
-    return res.status(404).json({ error: "کد فضای مقصد یافت نشد." });
-  }
-
-  if (!space.inbox) {
-    space.inbox = [];
-  }
-
-  const newSharedTask: SharedTask = {
-    id: taskId || Math.random().toString(36).substring(7),
-    senderSpaceId: senderSpaceId || "ناشناس",
-    encryptedData,
-    sharedAt: Date.now(),
-  };
-
-  space.inbox.push(newSharedTask);
-  space.updatedAt = Date.now();
-  saveDatabase();
-
-  // Send real-time notification update via SSE to all active connections in the recipient's space
-  clients.forEach((client) => {
-    if (client.spaceId === spaceId) {
-      try {
-        client.res.write(
-          `data: ${JSON.stringify({
-            type: "share",
-            spaceId,
-            senderSpaceId: senderSpaceId || "ناشناس",
-            sharedTask: newSharedTask,
-          })}\n\n`
-        );
-      } catch (err) {
-        console.error("Failed to push SSE notification to shared client:", err);
-      }
+  try {
+    const space = await prisma.space.findUnique({ where: { id: spaceId } });
+    if (!space) {
+      return res.status(404).json({ error: "کد فضای مقصد یافت نشد." });
     }
-  });
 
-  res.json({ success: true });
+    if (!dbInbox[spaceId]) {
+      dbInbox[spaceId] = [];
+    }
+
+    const newSharedTask: SharedTask = {
+      id: taskId || Math.random().toString(36).substring(7),
+      senderSpaceId: senderSpaceId || "ناشناس",
+      encryptedData,
+      sharedAt: Date.now(),
+    };
+
+    dbInbox[spaceId].push(newSharedTask);
+
+    // Push realtime notification to the recipient's space
+    clients.forEach((client) => {
+      if (client.spaceId === spaceId) {
+        try {
+          client.res.write(
+            `data: ${JSON.stringify({
+              type: "share",
+              spaceId,
+              senderSpaceId: senderSpaceId || "ناشناس",
+              sharedTask: newSharedTask,
+            })}\n\n`
+          );
+        } catch (err) {
+          console.error("Failed to push SSE notification to shared client:", err);
+        }
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
 });
 
 // API: Remove/accept a shared task from the inbox
@@ -229,11 +205,8 @@ app.post("/api/sync/space/:spaceId/inbox/remove", (req, res) => {
   const { spaceId } = req.params;
   const { taskId } = req.body;
 
-  const space = db.spaces[spaceId];
-  if (space && space.inbox) {
-    space.inbox = space.inbox.filter((t) => t.id !== taskId);
-    space.updatedAt = Date.now();
-    saveDatabase();
+  if (dbInbox[spaceId]) {
+    dbInbox[spaceId] = dbInbox[spaceId].filter((t) => t.id !== taskId);
   }
 
   res.json({ success: true });
@@ -277,46 +250,37 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   const normalized = username.trim().toLowerCase();
-  if (!db.users) {
-    db.users = {};
-  }
-
-  if (db.users[normalized]) {
-    return res.status(400).json({ error: "این نام کاربری قبلاً ثبت شده است." });
-  }
-
-  // Generate a new space ID
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let spaceId = "SPACE-";
-  for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
-  spaceId += "-";
-  for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
 
   try {
+    const existingUser = await prisma.user.findUnique({ where: { username: normalized } });
+
+    if (existingUser) {
+      return res.status(400).json({ error: "این نام کاربری قبلاً ثبت شده است." });
+    }
+
+    // Generate a new space ID
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let spaceId = "SPACE-";
+    for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
+    spaceId += "-";
+    for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
+
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(password, saltRounds);
 
-    // Save the user account
-    db.users[normalized] = {
-      username: username.trim(),
-      passwordHash,
-      spaceId,
-      createdAt: Date.now()
-    };
+    await prisma.space.create({ data: { id: spaceId } });
 
-    // Pre-initialize space
-    db.spaces[spaceId] = {
-      spaceId,
-      tasks: [],
-      inbox: [],
-      updatedAt: Date.now()
-    };
-
-    saveDatabase();
+    const newUser = await prisma.user.create({
+      data: {
+        username: normalized,
+        passwordHash,
+        spaceId
+      }
+    });
 
     res.json({ success: true, username: username.trim(), spaceId });
   } catch (error) {
-    console.error("Error hashing password:", error);
+    console.error("Error in registration:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -329,17 +293,16 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   const normalized = username.trim().toLowerCase();
-  if (!db.users) {
-    db.users = {};
-  }
-
-  const user = db.users[normalized];
-  if (!user) {
-    return res.status(400).json({ error: "نام کاربری یا گذرواژه نادرست است." });
-  }
 
   try {
+    const user = await prisma.user.findUnique({ where: { username: normalized } });
+
+    if (!user) {
+      return res.status(400).json({ error: "نام کاربری یا گذرواژه نادرست است." });
+    }
+
     const match = await bcrypt.compare(password, user.passwordHash);
+
     // Backward compatibility for plaintext passwords
     const isLegacyPlaintext = user.passwordHash === password;
 
@@ -350,13 +313,15 @@ app.post("/api/auth/login", async (req, res) => {
     if (isLegacyPlaintext) {
         // Upgrade to hashed password immediately
         const saltRounds = 10;
-        user.passwordHash = await bcrypt.hash(password, saltRounds);
-        saveDatabase();
+        await prisma.user.update({
+            where: { username: normalized },
+            data: { passwordHash: await bcrypt.hash(password, saltRounds) }
+        });
     }
 
     res.json({ success: true, username: user.username, spaceId: user.spaceId });
   } catch (error) {
-    console.error("Error comparing password:", error);
+    console.error("Error in login:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });

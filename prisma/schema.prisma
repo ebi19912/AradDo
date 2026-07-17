@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  role         String   @default("User") // Admin, Manager, User, Guest
+  spaceId      String   @unique
+  space        Space    @relation(fields: [spaceId], references: [id])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Space {
+  id        String   @id @default(uuid())
+  users     User[]
+  tasks     Task[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Task {
+  id           String    @id @default(uuid())
+  title        String
+  notes        String?
+  priority     String    @default("medium") // low, medium, high
+  category     String    @default("شخصی")
+  completed    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+  dueDate      String?
+  reminderTime String?
+  repeat       String?   // None, Daily, Weekly, Monthly
+  order        Int?      @default(0)
+  spaceId      String
+  space        Space     @relation(fields: [spaceId], references: [id])
+  syncStatus   String    @default("synced") // 'synced', 'pending_create', 'pending_update', 'pending_delete'
+  updatedAt    DateTime  @updatedAt
+}
+
+model AISetting {
+  id           Int      @id @default(1)
+  provider     String   @default("Gemini") // OpenRouter, OpenAI, Gemini, Claude, DeepSeek, Groq, Ollama
+  baseUrl      String?
+  apiKey       String?
+  model        String   @default("gemini-3.5-flash")
+  temperature  Float    @default(0.7)
+  topP         Float?
+  topK         Int?
+  maxTokens    Int      @default(8000)
+  systemPrompt String?
+  enabled      Boolean  @default(true)
+  updatedAt    DateTime @updatedAt
+}
+
+model SiteSetting {
+  id           Int      @id @default(1)
+  siteName     String   @default("آراددو")
+  siteDesc     String   @default("مدیریت هوشمند وظایف")
+  logoUrl      String?
+  faviconUrl   String?
+  primaryColor String?
+  secondaryColor String?
+  footerText   String?
+  updatedAt    DateTime @updatedAt
+}

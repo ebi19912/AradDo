@@ -24,164 +24,155 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 // server.ts
 var import_express = __toESM(require("express"), 1);
 var import_path = __toESM(require("path"), 1);
-var import_fs = __toESM(require("fs"), 1);
 var import_vite = require("vite");
 var import_genai = require("@google/genai");
+var import_bcrypt = __toESM(require("bcrypt"), 1);
+var import_client = require("@prisma/client");
+var prisma = new import_client.PrismaClient();
 var app = (0, import_express.default)();
-var PORT = 3e3;
+var PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3e3;
 app.use(import_express.default.json({ limit: "15mb" }));
-var DB_DIR = import_path.default.join(process.cwd(), "data");
-var DB_FILE = import_path.default.join(DB_DIR, "tasks-db.json");
-var db = { spaces: {}, users: {} };
-function loadDatabase() {
-  try {
-    if (!import_fs.default.existsSync(DB_DIR)) {
-      import_fs.default.mkdirSync(DB_DIR, { recursive: true });
-    }
-    if (import_fs.default.existsSync(DB_FILE)) {
-      const data = import_fs.default.readFileSync(DB_FILE, "utf-8");
-      db = JSON.parse(data);
-      if (!db.users) {
-        db.users = {};
-      }
-      console.log("Database loaded successfully with", Object.keys(db.spaces).length, "spaces.");
-    } else {
-      db.users = {};
-      saveDatabase();
-    }
-  } catch (error) {
-    console.error("Failed to load database, starting fresh:", error);
-    db.users = {};
-  }
-}
-function saveDatabase() {
-  try {
-    if (!import_fs.default.existsSync(DB_DIR)) {
-      import_fs.default.mkdirSync(DB_DIR, { recursive: true });
-    }
-    import_fs.default.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
-  } catch (error) {
-    console.error("Failed to save database:", error);
-  }
-}
-loadDatabase();
+var dbInbox = {};
 var clients = [];
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", time: (/* @__PURE__ */ new Date()).toISOString() });
 });
-app.post("/api/sync/create-space", (req, res) => {
+app.post("/api/sync/create-space", async (req, res) => {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
   let spaceId = "SPACE-";
   for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
   spaceId += "-";
   for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
-  db.spaces[spaceId] = {
-    spaceId,
-    tasks: [],
-    inbox: [],
-    updatedAt: Date.now()
-  };
-  saveDatabase();
-  res.json({ spaceId, success: true });
+  try {
+    await prisma.space.create({
+      data: {
+        id: spaceId
+      }
+    });
+    res.json({ spaceId, success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to create space" });
+  }
 });
-app.get("/api/sync/space/:spaceId", (req, res) => {
+app.get("/api/sync/space/:spaceId", async (req, res) => {
   const { spaceId } = req.params;
-  const space = db.spaces[spaceId];
-  if (!space) {
-    return res.status(404).json({ error: "Space not found" });
+  try {
+    const space = await prisma.space.findUnique({
+      where: { id: spaceId },
+      include: { tasks: true }
+    });
+    if (!space) {
+      return res.status(404).json({ error: "Space not found" });
+    }
+    const inbox = dbInbox[spaceId] || [];
+    const mappedTasks = space.tasks.map((t) => ({
+      id: t.id,
+      encryptedData: t.notes || "",
+      updatedAt: t.updatedAt.getTime()
+    }));
+    res.json({
+      spaceId: space.id,
+      tasks: mappedTasks,
+      inbox,
+      updatedAt: space.updatedAt.getTime()
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
   }
-  if (!space.inbox) {
-    space.inbox = [];
-  }
-  res.json(space);
 });
-app.post("/api/sync/space/:spaceId/update", (req, res) => {
+app.post("/api/sync/space/:spaceId/update", async (req, res) => {
   const { spaceId } = req.params;
   const { tasks } = req.body;
   if (!Array.isArray(tasks)) {
     return res.status(400).json({ error: "Invalid tasks payload" });
   }
-  let space = db.spaces[spaceId];
-  if (!space) {
-    space = {
-      spaceId,
-      tasks: [],
-      inbox: [],
-      updatedAt: Date.now()
-    };
-    db.spaces[spaceId] = space;
-  }
-  space.tasks = tasks.map((t) => ({
-    id: String(t.id),
-    encryptedData: String(t.encryptedData),
-    updatedAt: Number(t.updatedAt) || Date.now()
-  }));
-  space.updatedAt = Date.now();
-  saveDatabase();
-  const senderClientId = req.headers["x-client-id"];
-  clients.forEach((client) => {
-    if (client.spaceId === spaceId && client.id !== senderClientId) {
-      try {
-        client.res.write(`data: ${JSON.stringify({ type: "sync", spaceId, updatedAt: space.updatedAt })}
+  try {
+    let space = await prisma.space.findUnique({ where: { id: spaceId } });
+    if (!space) {
+      space = await prisma.space.create({ data: { id: spaceId } });
+    }
+    for (const t of tasks) {
+      await prisma.task.upsert({
+        where: { id: t.id },
+        create: {
+          id: t.id,
+          spaceId: space.id,
+          title: "Encrypted Task",
+          notes: t.encryptedData || t.data || ""
+        },
+        update: {
+          notes: t.encryptedData || t.data || ""
+        }
+      });
+    }
+    const updatedAt = Date.now();
+    const senderClientId = req.headers["x-client-id"];
+    clients.forEach((client) => {
+      if (client.spaceId === spaceId && client.id !== senderClientId) {
+        try {
+          client.res.write(`data: ${JSON.stringify({ type: "sync", spaceId, updatedAt })}
 
 `);
-      } catch (err) {
-        console.error("Error sending SSE update:", err);
+        } catch (err) {
+          console.error("Error sending SSE update:", err);
+        }
       }
-    }
-  });
-  res.json({ success: true, updatedAt: space.updatedAt });
+    });
+    res.json({ success: true, updatedAt });
+  } catch (err) {
+    console.error("Update error:", err);
+    res.status(500).json({ error: "Database error" });
+  }
 });
-app.post("/api/sync/space/:spaceId/share", (req, res) => {
+app.post("/api/sync/space/:spaceId/share", async (req, res) => {
   const { spaceId } = req.params;
   const { senderSpaceId, encryptedData, taskId } = req.body;
   if (!encryptedData) {
     return res.status(400).json({ error: "encryptedData is required" });
   }
-  let space = db.spaces[spaceId];
-  if (!space) {
-    return res.status(404).json({ error: "\u06A9\u062F \u0641\u0636\u0627\u06CC \u0645\u0642\u0635\u062F \u06CC\u0627\u0641\u062A \u0646\u0634\u062F." });
-  }
-  if (!space.inbox) {
-    space.inbox = [];
-  }
-  const newSharedTask = {
-    id: taskId || Math.random().toString(36).substring(7),
-    senderSpaceId: senderSpaceId || "\u0646\u0627\u0634\u0646\u0627\u0633",
-    encryptedData,
-    sharedAt: Date.now()
-  };
-  space.inbox.push(newSharedTask);
-  space.updatedAt = Date.now();
-  saveDatabase();
-  clients.forEach((client) => {
-    if (client.spaceId === spaceId) {
-      try {
-        client.res.write(
-          `data: ${JSON.stringify({
-            type: "share",
-            spaceId,
-            senderSpaceId: senderSpaceId || "\u0646\u0627\u0634\u0646\u0627\u0633",
-            sharedTask: newSharedTask
-          })}
+  try {
+    const space = await prisma.space.findUnique({ where: { id: spaceId } });
+    if (!space) {
+      return res.status(404).json({ error: "\u06A9\u062F \u0641\u0636\u0627\u06CC \u0645\u0642\u0635\u062F \u06CC\u0627\u0641\u062A \u0646\u0634\u062F." });
+    }
+    if (!dbInbox[spaceId]) {
+      dbInbox[spaceId] = [];
+    }
+    const newSharedTask = {
+      id: taskId || Math.random().toString(36).substring(7),
+      senderSpaceId: senderSpaceId || "\u0646\u0627\u0634\u0646\u0627\u0633",
+      encryptedData,
+      sharedAt: Date.now()
+    };
+    dbInbox[spaceId].push(newSharedTask);
+    clients.forEach((client) => {
+      if (client.spaceId === spaceId) {
+        try {
+          client.res.write(
+            `data: ${JSON.stringify({
+              type: "share",
+              spaceId,
+              senderSpaceId: senderSpaceId || "\u0646\u0627\u0634\u0646\u0627\u0633",
+              sharedTask: newSharedTask
+            })}
 
 `
-        );
-      } catch (err) {
-        console.error("Failed to push SSE notification to shared client:", err);
+          );
+        } catch (err) {
+          console.error("Failed to push SSE notification to shared client:", err);
+        }
       }
-    }
-  });
-  res.json({ success: true });
+    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Database error" });
+  }
 });
 app.post("/api/sync/space/:spaceId/inbox/remove", (req, res) => {
   const { spaceId } = req.params;
   const { taskId } = req.body;
-  const space = db.spaces[spaceId];
-  if (space && space.inbox) {
-    space.inbox = space.inbox.filter((t) => t.id !== taskId);
-    space.updatedAt = Date.now();
-    saveDatabase();
+  if (dbInbox[spaceId]) {
+    dbInbox[spaceId] = dbInbox[spaceId].filter((t) => t.id !== taskId);
   }
   res.json({ success: true });
 });
@@ -208,53 +199,66 @@ app.get("/api/sync/subscribe", (req, res) => {
     clients = clients.filter((c) => c.id !== client.id);
   });
 });
-app.post("/api/auth/register", (req, res) => {
+app.post("/api/auth/register", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: "\u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u0648 \u06AF\u0630\u0631\u0648\u0627\u0698\u0647 \u0627\u0644\u0632\u0627\u0645\u06CC \u0647\u0633\u062A\u0646\u062F." });
   }
   const normalized = username.trim().toLowerCase();
-  if (!db.users) {
-    db.users = {};
+  try {
+    const existingUser = await prisma.user.findUnique({ where: { username: normalized } });
+    if (existingUser) {
+      return res.status(400).json({ error: "\u0627\u06CC\u0646 \u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u0642\u0628\u0644\u0627\u064B \u062B\u0628\u062A \u0634\u062F\u0647 \u0627\u0633\u062A." });
+    }
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let spaceId = "SPACE-";
+    for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
+    spaceId += "-";
+    for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
+    const saltRounds = 10;
+    const passwordHash = await import_bcrypt.default.hash(password, saltRounds);
+    await prisma.space.create({ data: { id: spaceId } });
+    const newUser = await prisma.user.create({
+      data: {
+        username: normalized,
+        passwordHash,
+        spaceId
+      }
+    });
+    res.json({ success: true, username: username.trim(), spaceId });
+  } catch (error) {
+    console.error("Error in registration:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
-  if (db.users[normalized]) {
-    return res.status(400).json({ error: "\u0627\u06CC\u0646 \u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u0642\u0628\u0644\u0627\u064B \u062B\u0628\u062A \u0634\u062F\u0647 \u0627\u0633\u062A." });
-  }
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  let spaceId = "SPACE-";
-  for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
-  spaceId += "-";
-  for (let i = 0; i < 4; i++) spaceId += chars.charAt(Math.floor(Math.random() * chars.length));
-  db.users[normalized] = {
-    username: username.trim(),
-    passwordHash: password,
-    // plaintext comparison for custom local-secured client storage
-    spaceId,
-    createdAt: Date.now()
-  };
-  db.spaces[spaceId] = {
-    spaceId,
-    tasks: [],
-    inbox: [],
-    updatedAt: Date.now()
-  };
-  saveDatabase();
-  res.json({ success: true, username: username.trim(), spaceId });
 });
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   const { username, password } = req.body;
   if (!username || !password) {
     return res.status(400).json({ error: "\u0648\u0627\u0631\u062F \u06A9\u0631\u062F\u0646 \u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u0648 \u06AF\u0630\u0631\u0648\u0627\u0698\u0647 \u0627\u0644\u0632\u0627\u0645\u06CC \u0627\u0633\u062A." });
   }
   const normalized = username.trim().toLowerCase();
-  if (!db.users) {
-    db.users = {};
+  try {
+    const user = await prisma.user.findUnique({ where: { username: normalized } });
+    if (!user) {
+      return res.status(400).json({ error: "\u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u06CC\u0627 \u06AF\u0630\u0631\u0648\u0627\u0698\u0647 \u0646\u0627\u062F\u0631\u0633\u062A \u0627\u0633\u062A." });
+    }
+    const match = await import_bcrypt.default.compare(password, user.passwordHash);
+    const isLegacyPlaintext = user.passwordHash === password;
+    if (!match && !isLegacyPlaintext) {
+      return res.status(400).json({ error: "\u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u06CC\u0627 \u06AF\u0630\u0631\u0648\u0627\u0698\u0647 \u0646\u0627\u062F\u0631\u0633\u062A \u0627\u0633\u062A." });
+    }
+    if (isLegacyPlaintext) {
+      const saltRounds = 10;
+      await prisma.user.update({
+        where: { username: normalized },
+        data: { passwordHash: await import_bcrypt.default.hash(password, saltRounds) }
+      });
+    }
+    res.json({ success: true, username: user.username, spaceId: user.spaceId });
+  } catch (error) {
+    console.error("Error in login:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
-  const user = db.users[normalized];
-  if (!user || user.passwordHash !== password) {
-    return res.status(400).json({ error: "\u0646\u0627\u0645 \u06A9\u0627\u0631\u0628\u0631\u06CC \u06CC\u0627 \u06AF\u0630\u0631\u0648\u0627\u0698\u0647 \u0646\u0627\u062F\u0631\u0633\u062A \u0627\u0633\u062A." });
-  }
-  res.json({ success: true, username: user.username, spaceId: user.spaceId });
 });
 app.post("/api/ai/parse-task", async (req, res) => {
   const { prompt, todayContext } = req.body;
@@ -275,7 +279,7 @@ Do not use markdown formatting in your response. Return ONLY raw JSON.
 
 Current context info:
 - Today is: ${todayContext || (/* @__PURE__ */ new Date()).toLocaleString("fa-IR")}
-- Use this context to resolve relative dates like "\u0641\u0631\u062F\u0627" (tomorrow), "\u0634\u0646\u0628\u0647" (Saturday), "\u067E\u0633\u200C\u0641\u0631\u062F\u0627", "\u0622\u062E\u0631 \u0647\u0641\u062A\u0647", etc., into the exact YYYY-MM-DD format.`;
+- Use this context to resolve relative dates like "\u0641\u0631\u062F\u0627" (tomorrow), "\u0634\u0646\u0628\u0647" (Saturday), "\u067E\u0633\u200C\u0641\u0631\u062F\u0627", "\u0622\u062E\u0631 \u0647\u0641\u062A\u0647", etc., into the exact Jalali format YYYY/MM/DD based on the provided context (\u0627\u0645\u0631\u0648\u0632).`;
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
       contents: `\u0645\u062A\u0646 \u06A9\u0627\u0631\u0628\u0631 \u0628\u0631\u0627\u06CC \u0627\u0633\u062A\u062E\u0631\u0627\u062C \u062A\u0633\u06A9\u200C\u0647\u0627: "${prompt}"`,
@@ -335,7 +339,7 @@ Do not use markdown formatting. Return ONLY raw JSON.
 
 Current context info:
 - Today is: ${todayContext || (/* @__PURE__ */ new Date()).toLocaleString("fa-IR")}
-- Convert relative dates into the exact YYYY-MM-DD format.`;
+- Convert relative dates into the exact Jalali format YYYY/MM/DD based on the provided context (\u0627\u0645\u0631\u0648\u0632).`;
     const response = await ai.models.generateContent({
       model: "gemini-3.5-flash",
       contents: [

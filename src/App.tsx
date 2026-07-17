@@ -226,11 +226,13 @@ export default function App() {
           );
 
           // Post to server
+          const authToken = localStorage.getItem("authToken") || "";
           const res = await fetch(`/api/sync/space/${syncConfig.spaceId}/update`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "X-Client-ID": syncConfig.clientId,
+              "Authorization": `Bearer ${authToken}`
             },
             body: JSON.stringify({ tasks: encryptedTasks }),
           });
@@ -260,7 +262,12 @@ export default function App() {
 
     setSyncConfig((prev) => ({ ...prev, status: "syncing" }));
     try {
-      const res = await fetch(`/api/sync/space/${syncConfig.spaceId}`);
+      const authToken = localStorage.getItem("authToken") || "";
+      const res = await fetch(`/api/sync/space/${syncConfig.spaceId}`, {
+        headers: {
+          "Authorization": `Bearer ${authToken}`
+        }
+      });
       if (!res.ok) {
         if (res.status === 404) {
           // Space is new/deleted, push current tasks to populate it
@@ -541,10 +548,12 @@ export default function App() {
       // Encrypt the task data with the current passphrase
       const encryptedStr = await encryptData(JSON.stringify(shareTargetTask), syncConfig.passphrase);
 
+      const authToken = localStorage.getItem("authToken") || "";
       const res = await fetch(`/api/sync/space/${shareTargetSpaceId.trim().toUpperCase()}/share`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "Authorization": `Bearer ${authToken}`
         },
         body: JSON.stringify({
           senderSpaceId: syncConfig.spaceId || "دستگاه فرستنده",
@@ -590,9 +599,10 @@ export default function App() {
 
     // Remove from Inbox on server
     try {
+      const authToken = localStorage.getItem("authToken") || "";
       await fetch(`/api/sync/space/${syncConfig.spaceId}/inbox/remove`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
         body: JSON.stringify({ taskId: inboxItem.inboxId }),
       });
     } catch (err) {
@@ -606,9 +616,10 @@ export default function App() {
   // Inbox handler: Reject a shared task
   const handleRejectShared = async (inboxItem: any) => {
     try {
+      const authToken = localStorage.getItem("authToken") || "";
       await fetch(`/api/sync/space/${syncConfig.spaceId}/inbox/remove`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
         body: JSON.stringify({ taskId: inboxItem.inboxId }),
       });
     } catch (err) {

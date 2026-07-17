@@ -102,12 +102,13 @@ export default function AISmartCreator({ onTasksAdded, triggerNotification, them
 
     try {
       let res;
+      const authToken = localStorage.getItem("authToken") || "";
       if (selectedFile) {
         // File Upload Processing
         const base64Data = await fileToBase64(selectedFile);
         res = await fetch("/api/ai/upload-file", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
           body: JSON.stringify({
             base64: base64Data,
             mimeType: selectedFile.type,
@@ -118,7 +119,7 @@ export default function AISmartCreator({ onTasksAdded, triggerNotification, them
         // Natural Language Parsing
         res = await fetch("/api/ai/parse-task", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${authToken}` },
           body: JSON.stringify({
             prompt: promptText.trim(),
             todayContext,

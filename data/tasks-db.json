@@ -1,0 +1,54 @@
+{
+  "spaces": {
+    "SPACE-QD2J-XHSA": {
+      "spaceId": "SPACE-QD2J-XHSA",
+      "tasks": [],
+      "inbox": [],
+      "updatedAt": 1784276104123
+    },
+    "SPACE-7IYP-BU09": {
+      "spaceId": "SPACE-7IYP-BU09",
+      "tasks": [],
+      "inbox": [],
+      "updatedAt": 1784276699088
+    },
+    "SPACE-2HNJ-G2OY": {
+      "spaceId": "SPACE-2HNJ-G2OY",
+      "tasks": [],
+      "inbox": [],
+      "updatedAt": 1784283830997
+    },
+    "SPACE-JUHW-JGT0": {
+      "spaceId": "SPACE-JUHW-JGT0",
+      "tasks": [],
+      "inbox": [],
+      "updatedAt": 1784284309932
+    }
+  },
+  "users": {
+    "testuser": {
+      "username": "testuser",
+      "passwordHash": "$2b$10$V.0WW7HkNtqRGx715CRbleFvCF8qMpCEcgEMkBcU/ldtrwC9WWYwS",
+      "spaceId": "SPACE-QD2J-XHSA",
+      "createdAt": 1784276104123
+    },
+    "testuser2": {
+      "username": "testuser2",
+      "passwordHash": "password123",
+      "spaceId": "SPACE-7IYP-BU09",
+      "createdAt": 1784276699088
+    },
+    "testuser3": {
+      "username": "testuser3",
+      "passwordHash": "password123",
+      "spaceId": "SPACE-2HNJ-G2OY",
+      "createdAt": 1784283830996
+    },
+    "jules": {
+      "username": "jules",
+      "passwordHash": "$2b$10$tWy4S1r/WvuHMzdcGWO5L.Brs/BsvCkSRp7ap9D9ZpSFq2kFHxAe2",
+      "spaceId": "SPACE-JUHW-JGT0",
+      "createdAt": 1784284309932
+    }
+  }
+}

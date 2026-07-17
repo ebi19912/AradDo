@@ -1,0 +1,60 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Vazirmatn:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Vazirmatn", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Natural Tones Light Theme Colors */
+  --color-nat-bg: #F9F8F4;
+  --color-nat-card: rgba(255, 255, 255, 0.4);
+  --color-nat-sidebar: rgba(235, 233, 224, 0.5);
+  --color-nat-border: rgba(220, 217, 206, 0.6);
+  --color-nat-primary: #7C7C5F;
+  --color-nat-dark: #2D2D24;
+  --color-nat-muted: #9A9A8A;
+  --color-nat-hover: rgba(226, 224, 213, 0.5);
+
+  /* Natural Tones Dark Theme Colors */
+  --color-nat-dark-bg: #141411;
+  --color-nat-dark-card: rgba(29, 29, 23, 0.4);
+  --color-nat-dark-sidebar: rgba(38, 38, 31, 0.5);
+  --color-nat-dark-border: rgba(58, 58, 49, 0.6);
+  --color-nat-dark-primary: #949472;
+  --color-nat-dark-muted: #8E8E7D;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: var(--color-nat-dark-border);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-nat-border);
+  border-radius: 9999px;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: var(--color-nat-dark-muted);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-nat-muted);
+}
+
+/* Base resets for clean text layout */
+body {
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}

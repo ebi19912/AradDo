@@ -1,0 +1,12 @@
+.
+├── docker-compose.yml
+├── Dockerfile
+├── nginx/
+│   └── nginx.conf
+└── services/
+    ├── auth_service/
+    │   ├── main.py
+    │   └── requirements.txt
+    └── task_service/
+        ├── main.py
+        └── requirements.txt

@@ -4,3 +4,8 @@ sqlalchemy
 psycopg2-binary
 pydantic
 python-dotenv
+passlib[bcrypt]
+bcrypt==3.2.2
+PyJWT
+python-multipart
+email-validator

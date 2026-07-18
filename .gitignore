@@ -1,3 +1,6 @@
 node_modules
 
 /src/generated/prisma
+dist/
+__pycache__/
+*.pyc
